@@ -6,10 +6,13 @@ import sys
 import os
 from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
-OUTPUT_DIR = Path.home() / "idea-radar-output"
-PORT = 8421
+# Config via environment so the same file works locally and in a container.
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(Path.home() / "idea-radar-output")))
+PORT = int(os.getenv("PORT", "8421"))
+HOST = os.getenv("HOST", "127.0.0.1")
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="fr">
@@ -972,9 +975,15 @@ class RadarHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle each request in its own thread (the UI fires several in parallel)."""
+    daemon_threads = True
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
-    server = HTTPServer(("127.0.0.1", port), RadarHandler)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    server = ThreadedHTTPServer((HOST, port), RadarHandler)
     print(f"\n  IDEA RADAR — Dashboard")
     print(f"  http://localhost:{port}")
     print(f"  Data: {OUTPUT_DIR}\n")
