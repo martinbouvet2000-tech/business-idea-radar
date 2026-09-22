@@ -26,10 +26,12 @@ try:
 except ImportError:
     pass
 
+# praw is only needed for the authenticated (OAuth) scraper. Without it the
+# radar falls back to Reddit's public JSON API, so keep the import optional.
 try:
     import praw
 except ImportError:
-    sys.exit("[!] pip install praw")
+    praw = None
 
 import subprocess
 import shutil
@@ -68,6 +70,10 @@ MAX_TOKENS = 8192
 MIN_COMMENTS = 15
 TOP_COMMENTS_PER_THREAD = 20
 DEFAULT_HOURS_BACK = 48
+
+# Threads scoring below this in the pre-filter are dropped before they ever
+# reach Claude (unless a cross-subreddit signal rescues them). Saves tokens.
+MIN_PRE_SCORE = 20
 
 # ============================================================================
 # PROMPT
@@ -239,6 +245,139 @@ def fetch_json(url: str, retries: int = 2) -> dict | None:
     return None
 
 
+def pre_score_thread(t: dict) -> float:
+    """Pre-score a thread BEFORE sending it to Claude. Saves tokens by filtering
+    noise. Score 0-100; threads below MIN_PRE_SCORE are dropped."""
+    score = 0
+    title = t.get("title", "").lower()
+    selftext = t.get("selftext", "").lower()
+    combined = title + " " + selftext
+
+    # Pain signals in title/selftext (+0-30)
+    pain_keywords = [
+        "frustrated", "annoying", "broken", "terrible", "hate", "waste",
+        "overpriced", "expensive", "switching from", "looking for alternative",
+        "need a tool", "is there a", "why is there no", "does anyone know",
+        "help me find", "tired of", "fed up", "pain", "struggle", "problem",
+        "can't find", "doesn't exist", "no good", "all suck", "nothing works",
+        "paying too much", "costs too much", "wasting time", "manual process",
+        "workaround", "hack together", "duct tape", "cobbled together",
+    ]
+    hits = sum(1 for kw in pain_keywords if kw in combined)
+    score += min(hits * 6, 30)
+
+    # Anti-signals (self-promo, hiring, memes) (-points)
+    noise_keywords = [
+        "hiring", "job post", "looking for co-founder", "check out my",
+        "i built", "launched", "show hn", "my new project", "feedback on my",
+        "ama", "meme", "funny", "off topic", "weekly thread",
+    ]
+    noise_hits = sum(1 for kw in noise_keywords if kw in combined)
+    score -= noise_hits * 10
+
+    # Engagement quality (+0-30)
+    comments = t.get("comments_count", 0)
+    upvotes = t.get("score", 0)
+    ratio = comments / max(upvotes, 1)  # High comment/vote ratio = discussion, not meme
+    if ratio > 0.3:
+        score += 10
+    if ratio > 0.5:
+        score += 5
+    if comments > 50:
+        score += 10
+    elif comments > 25:
+        score += 5
+
+    # Comment pain signals (+0-25)
+    pain_in_comments = 0
+    for c in t.get("top_comments", []):
+        body = c.get("body", "").lower()
+        if any(kw in body for kw in ["pay for", "would pay", "shut up and take",
+               "need this", "been looking", "same problem", "me too", "this is why",
+               "switched to", "switched from", "tried", "doesn't work", "$"]):
+            pain_in_comments += 1
+    score += min(pain_in_comments * 5, 25)
+
+    # Upvote baseline (+0-15)
+    if upvotes > 500:
+        score += 15
+    elif upvotes > 100:
+        score += 10
+    elif upvotes > 30:
+        score += 5
+
+    return max(score, 0)
+
+
+def detect_cross_signals(threads: list[dict]) -> list[dict]:
+    """Detect the same pain being discussed across multiple subreddits.
+    Adds cross_signal metadata to each thread. Same pain in 2+ subs = strong
+    market signal, so those threads get a multiplier instead of being filtered."""
+
+    def key_terms(title: str) -> set:
+        stop = {"the", "a", "an", "is", "are", "was", "were", "to", "for", "in", "on",
+                "of", "with", "and", "or", "but", "not", "this", "that", "it", "i", "my",
+                "your", "how", "what", "why", "do", "does", "can", "will", "would", "should",
+                "have", "has", "been", "from", "about", "just", "all", "any", "no", "so",
+                "if", "as", "at", "by", "up", "out", "get", "got", "we", "you", "there"}
+        words = set(re.findall(r'[a-z]+', title.lower())) - stop
+        return {w for w in words if len(w) > 3}
+
+    for t in threads:
+        t["_terms"] = key_terms(t["title"])
+        t["cross_signal"] = {"related_subs": [], "signal_strength": 1.0}
+
+    for i, t1 in enumerate(threads):
+        for t2 in threads[i + 1:]:
+            if t1["subreddit"] == t2["subreddit"]:
+                continue
+            overlap = t1["_terms"] & t2["_terms"]
+            if len(overlap) >= 5:  # 5+ shared meaningful words = related pain
+                if t2["subreddit"] not in t1["cross_signal"]["related_subs"]:
+                    t1["cross_signal"]["related_subs"].append(t2["subreddit"])
+                if t1["subreddit"] not in t2["cross_signal"]["related_subs"]:
+                    t2["cross_signal"]["related_subs"].append(t1["subreddit"])
+
+    for t in threads:
+        n_related = len(t["cross_signal"]["related_subs"])
+        if n_related >= 3:
+            t["cross_signal"]["signal_strength"] = 2.0
+        elif n_related >= 1:
+            t["cross_signal"]["signal_strength"] = 1.5
+        del t["_terms"]  # Cleanup
+
+    boosted = sum(1 for t in threads if t["cross_signal"]["signal_strength"] > 1)
+    if boosted:
+        print(f"  [CROSS-SIGNAL] {boosted} threads with pain detected across multiple subs")
+
+    return threads
+
+
+def apply_pre_filter(threads: list[dict]) -> list[dict]:
+    """Pre-score, detect cross-subreddit signals, drop noise, and sort by
+    pre_score * signal_strength. Shared by both scraping modes."""
+    if not threads:
+        return threads
+
+    print("[*] Pre-scoring threads...")
+    for t in threads:
+        t["pre_score"] = pre_score_thread(t)
+
+    threads = detect_cross_signals(threads)
+
+    before = len(threads)
+    threads = [t for t in threads
+               if t["pre_score"] >= MIN_PRE_SCORE
+               or t["cross_signal"]["signal_strength"] > 1]
+    dropped = before - len(threads)
+    if dropped:
+        print(f"  [PRE-FILTER] Dropped {dropped} noise threads (pre_score < {MIN_PRE_SCORE})")
+
+    threads.sort(key=lambda t: t["pre_score"] * t["cross_signal"]["signal_strength"],
+                 reverse=True)
+    return threads
+
+
 def scrape_public_api(hours_back: int, subreddits: list[str], min_comments: int) -> list[dict]:
     """Scrape via Reddit public JSON endpoints (no credentials needed)."""
     print("[*] Using Reddit public JSON API (no credentials)")
@@ -314,11 +453,14 @@ def scrape_public_api(hours_back: int, subreddits: list[str], min_comments: int)
             print(f"    {i+1}/{len(top_threads)} done")
         time.sleep(1.5)
 
+    top_threads = apply_pre_filter(top_threads)
     print(f"[+] {len(top_threads)} threads with comments ready")
     return top_threads
 
 
-def create_reddit_client() -> praw.Reddit:
+def create_reddit_client() -> "praw.Reddit":
+    if praw is None:
+        sys.exit("[!] Authenticated mode needs praw: pip install praw")
     return praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -394,13 +536,14 @@ def scrape_praw(hours_back: int, subreddits: list[str], min_comments: int) -> li
             continue
 
     threads.sort(key=lambda t: t["comments_count"] * 0.6 + t["score"] * 0.4, reverse=True)
+    threads = apply_pre_filter(threads)
     print(f"[+] {len(threads)} threads with {min_comments}+ comments")
     return threads
 
 
 def scrape_reddit(hours_back: int, subreddits: list[str], min_comments: int) -> list[dict]:
     """Auto-select scraping method based on available credentials."""
-    if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET:
+    if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET and praw is not None:
         return scrape_praw(hours_back, subreddits, min_comments)
     return scrape_public_api(hours_back, subreddits, min_comments)
 
@@ -425,7 +568,7 @@ Top Comments:
 """
 
 
-def analyze_batch(client: anthropic.Anthropic, threads: list[dict]) -> list[dict]:
+def analyze_batch(client: "anthropic.Anthropic", threads: list[dict]) -> list[dict]:
     threads_text = "\n\n".join(format_thread(i, t) for i, t in enumerate(threads))
 
     prompt = f"""{RADAR_PROMPT}
@@ -776,6 +919,12 @@ def save_results(ideas: list[dict]):
         path = OUTPUT_DIR / f"TIER1_{today}.json"
         save_json(tier1, path)
         print(f"[+] {len(tier1)} TIER 1 → {path}")
+        # Optional alerting (desktop toast / sound / log / webhook). Never fatal.
+        try:
+            from notifier import notify_tier1
+            notify_tier1(tier1)
+        except Exception:
+            pass
 
     if tier2:
         path = OUTPUT_DIR / f"TIER2_{today}.json"
