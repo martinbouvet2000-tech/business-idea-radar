@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Business Idea Radar — turns Reddit complaints into a ranked shortlist of business opportunities">
+  <title>Business Idea Radar</title>
+  <defs>
+    <pattern id="dots" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#252A31" />
+    </pattern>
+    <style>
+      .sans { font-family: "Inter", "Segoe UI", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="640" fill="#0B0D10" />
+  <rect width="1280" height="640" fill="url(#dots)" opacity="0.55" />
+
+  <rect x="40" y="40" width="1200" height="560" rx="14" fill="#11151A" stroke="#252A31" stroke-width="1" />
+
+  <!-- top rail -->
+  <text class="mono" x="120" y="122" font-size="15" fill="#8B949E">reddit_idea_radar.py</text>
+  <rect x="1131" y="112" width="8" height="8" fill="#F0883E" />
+  <text class="mono" x="1151" y="122" font-size="15" fill="#8B949E">v2</text>
+  <line x1="120" y1="152" x2="1160" y2="152" stroke="#252A31" stroke-width="1" />
+
+  <!-- accent rule -->
+  <rect x="120" y="228" width="3" height="152" fill="#F0883E" />
+
+  <text class="sans" x="152" y="248" font-size="14" font-weight="600" letter-spacing="3.4" fill="#8B949E">PYTHON · AI · MARKET RESEARCH</text>
+
+  <text class="sans" x="150" y="330" font-size="76" font-weight="700" letter-spacing="-1.6" fill="#F5F7FA">Business Idea Radar</text>
+
+  <text class="sans" x="152" y="380" font-size="25" fill="#8B949E">Turns Reddit complaints into a ranked shortlist of business opportunities.</text>
+
+  <!-- pipeline strip -->
+  <g class="mono" font-size="14" fill="#8B949E">
+    <text x="120" y="452">collect</text>
+    <text x="196" y="452" fill="#252A31">→</text>
+    <text x="224" y="452">detect pain points</text>
+    <text x="374" y="452" fill="#252A31">→</text>
+    <text x="402" y="452">score</text>
+    <text x="458" y="452" fill="#252A31">→</text>
+    <text x="486" y="452">shortlist</text>
+  </g>
+
+  <!-- bottom rail -->
+  <line x1="120" y1="500" x2="1160" y2="500" stroke="#252A31" stroke-width="1" />
+  <text class="mono" x="120" y="536" font-size="15" fill="#8B949E">github.com/martinbouvet2000-tech/business-idea-radar</text>
+  <text class="mono" x="1160" y="536" font-size="15" fill="#8B949E" text-anchor="end">MIT · Python 3.10+</text>
+</svg>
